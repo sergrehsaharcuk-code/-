@@ -10,73 +10,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 BOT_TOKEN = "8709039732:AAGY2cekV_Z3HnQp6fNNBHkPnjGT5xR6LgE"
 ADMIN_IDS = [1526536345]
 
-MAX_VIEWS_PER_PROXY = 5
-MAX_CONCURRENT = 150
+MAX_CONCURRENT = 10  # Меньше, чтобы не перегружать IP
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# ========== РЕАЛЬНЫЕ ИСТОЧНИКИ БЕСПЛАТНЫХ ПРОКСИ (ОБНОВЛЯЮТСЯ ЕЖЕДНЕВНО) ==========
-PROXY_SOURCES = [
-    # Самый надежный источник — прокси проверены за последние 24 часа
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-    
-    # Второй надежный источник
-    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/http.txt",
-    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/socks5.txt",
-    
-    # Резерв
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
-]
-
-class ProxyManager:
-    def __init__(self):
-        self.proxies = []
-        self.usage_count = {}
-    
-    async def collect_proxies(self):
-        all_proxies = set()
-        async with aiohttp.ClientSession() as session:
-            for url in PROXY_SOURCES:
-                try:
-                    async with session.get(url, timeout=15) as resp:
-                        if resp.status == 200:
-                            text = await resp.text()
-                            proxy_type = 'socks5' if 'socks5' in url else 'http'
-                            for line in text.splitlines():
-                                line = line.strip()
-                                if line and not line.startswith('#'):
-                                    if '://' not in line:
-                                        line = f"{proxy_type}://{line}"
-                                    all_proxies.add(line)
-                except Exception as e:
-                    logger.debug(f"Ошибка {url}: {e}")
-        
-        proxies = list(all_proxies)[:500]  # Берем первые 500
-        logger.info(f"📦 Собрано {len(proxies)} прокси")
-        return proxies
-    
-    async def update_pool(self):
-        self.proxies = await self.collect_proxies()
-        for p in self.proxies:
-            if p not in self.usage_count:
-                self.usage_count[p] = 0
-        logger.info(f"🔧 Пул: {len(self.proxies)} прокси")
-        return self.proxies
-    
-    async def get_proxy(self):
-        if not self.proxies:
-            return None
-        proxy = random.choice(self.proxies)
-        self.usage_count[proxy] = self.usage_count.get(proxy, 0) + 1
-        return proxy
-    
-    async def report_bad(self, proxy):
-        if proxy in self.proxies:
-            self.proxies.remove(proxy)
 
 class AsyncBooster:
     def __init__(self, post_url, target_views, chat_id, bot):
@@ -88,7 +25,6 @@ class AsyncBooster:
         self.channel = parts[3] if len(parts) > 3 else None
         self.post_id = parts[4] if len(parts) > 4 else None
         self.stats = {'success': 0, 'failed': 0}
-        self.proxy_manager = ProxyManager()
         self.running = True
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT)
     
@@ -98,12 +34,11 @@ class AsyncBooster:
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
         ])
     
-    async def send_view(self, proxy, session):
+    async def send_view(self, session):
         try:
             # Получаем токен
             async with session.get(
                 f'https://t.me/s/{self.channel}',
-                proxy=proxy,
                 timeout=10,
                 headers={'User-Agent': self._get_ua()}
             ) as resp:
@@ -118,7 +53,6 @@ class AsyncBooster:
             # Отправляем просмотр
             async with session.post(
                 f'https://t.me/v/?views={self.post_id}&token={token}',
-                proxy=proxy,
                 timeout=10,
                 headers={
                     'User-Agent': self._get_ua(),
@@ -126,30 +60,22 @@ class AsyncBooster:
                 }
             ) as resp:
                 return resp.status == 200
-        except:
+        except Exception as e:
+            logger.debug(f"Ошибка: {e}")
             return False
     
     async def worker(self, session):
         while self.running and self.stats['success'] < self.target:
-            proxy = await self.proxy_manager.get_proxy()
-            if not proxy:
-                await asyncio.sleep(3)
-                continue
-            
-            for _ in range(MAX_VIEWS_PER_PROXY):
-                if self.stats['success'] >= self.target or not self.running:
-                    break
+            async with self.semaphore:
+                if await self.send_view(session):
+                    self.stats['success'] += 1
+                    logger.info(f"✅ {self.stats['success']}/{self.target}")
+                else:
+                    self.stats['failed'] += 1
+                    logger.info(f"❌ Ошибка {self.stats['failed']}")
                 
-                async with self.semaphore:
-                    if await self.send_view(proxy, session):
-                        self.stats['success'] += 1
-                        logger.info(f"✅ {self.stats['success']}/{self.target} | {proxy}")
-                    else:
-                        self.stats['failed'] += 1
-                        await self.proxy_manager.report_bad(proxy)
-                        break
-                    
-                    await asyncio.sleep(random.uniform(1, 2))
+                # Ждем 30-60 секунд между просмотрами (чтобы не заблокировали)
+                await asyncio.sleep(random.uniform(30, 60))
     
     async def run(self):
         if not self.channel or not self.post_id:
@@ -158,40 +84,26 @@ class AsyncBooster:
         
         await self.bot.send_message(
             chat_id=self.chat_id,
-            text=f"🚀 Старт! {self.target} просмотров\n⏳ Собираю прокси..."
-        )
-        
-        await self.proxy_manager.update_pool()
-        
-        if not self.proxy_manager.proxies:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text="❌ Нет прокси. Попробуйте через 10 минут."
-            )
-            return
-        
-        await self.bot.send_message(
-            chat_id=self.chat_id,
-            text=f"✅ Прокси: {len(self.proxy_manager.proxies)}\n🚀 Начинаю..."
+            text=f"🚀 Старт! {self.target} просмотров\n⏳ Без прокси, по 1 просмотру в 30-60 сек"
         )
         
         async with aiohttp.ClientSession() as session:
-            workers = [asyncio.create_task(self.worker(session)) for _ in range(min(80, len(self.proxy_manager.proxies)))]
+            # Запускаем 1 воркер (чтобы не перегружать IP)
+            worker_task = asyncio.create_task(self.worker(session))
             
             last = 0
             while self.running and self.stats['success'] < self.target:
-                await asyncio.sleep(10)
+                await asyncio.sleep(30)
                 if self.stats['success'] > last:
                     percent = int(self.stats['success'] / self.target * 100)
                     await self.bot.send_message(
                         chat_id=self.chat_id,
-                        text=f"📊 {self.stats['success']}/{self.target} ({percent}%)\n✅ {self.stats['success']} | ❌ {self.stats['failed']}\n🔧 Прокси: {len(self.proxy_manager.proxies)}"
+                        text=f"📊 {self.stats['success']}/{self.target} ({percent}%)\n✅ {self.stats['success']} | ❌ {self.stats['failed']}"
                     )
                     last = self.stats['success']
             
             self.running = False
-            for w in workers:
-                w.cancel()
+            worker_task.cancel()
         
         await self.bot.send_message(
             chat_id=self.chat_id,
@@ -204,7 +116,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Нет доступа")
         return
     await update.message.reply_text(
-        "🤖 Бот для накрутки\n\n1️⃣ Отправь ссылку\n2️⃣ Отправь количество\n\nПример: https://t.me/durov/123"
+        "🤖 Бот для накрутки (без прокси)\n\n"
+        "1️⃣ Отправь ссылку\n"
+        "2️⃣ Отправь количество\n\n"
+        "⚠️ 1 просмотр в 30-60 секунд\n"
+        "Пример: https://t.me/durov/123"
     )
     context.user_data['waiting_for_link'] = True
 
@@ -217,32 +133,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['post_url'] = text
             context.user_data['waiting_for_link'] = False
             context.user_data['waiting_for_count'] = True
-            await update.message.reply_text("📊 Введите количество (до 10000):")
+            await update.message.reply_text("📊 Введите количество (до 500):")  # Ограничил до 500
         else:
             await update.message.reply_text("❌ Ссылка вида: https://t.me/канал/пост")
     elif context.user_data.get('waiting_for_count'):
         try:
             count = int(text)
-            if 1 <= count <= 10000:
+            if 1 <= count <= 500:
                 post_url = context.user_data.get('post_url')
                 context.user_data.clear()
                 await update.message.reply_text(f"✅ Задача: {count} просмотров\n⏳ Старт...")
                 booster = AsyncBooster(post_url, count, update.effective_chat.id, context.bot)
                 asyncio.create_task(booster.run())
             else:
-                await update.message.reply_text("❌ Число от 1 до 10000")
+                await update.message.reply_text("❌ Число от 1 до 500 (без прокси медленно)")
         except:
             await update.message.reply_text("❌ Введите число")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Бот работает\n🔧 7 источников прокси\n🔄 Обновление каждый запуск")
+    await update.message.reply_text("✅ Бот работает (без прокси)\n⏱️ 1 просмотр в 30-60 секунд")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("🚀 Бот запущен!")
+    logger.info("🚀 Бот запущен (без прокси)!")
     app.run_polling()
 
 if __name__ == "__main__":
