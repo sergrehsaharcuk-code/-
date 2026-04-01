@@ -15,10 +15,11 @@ BOT_TOKEN = "8709039732:AAGY2cekV_Z3HnQp6fNNBHkPnjGT5xR6LgE"
 ADMIN_IDS = [1526536345]  # Ваш ID
 
 # Настройки накрутки
-MAX_VIEWS_PER_PROXY = 5
-THREADS = 20
-DELAY_BETWEEN_VIEWS = (2, 5)
-PROXY_REFRESH_INTERVAL = 300
+MAX_VIEWS_PER_PROXY = 5        # 5 просмотров на один IP
+THREADS = 20                    # Количество потоков
+DELAY_BETWEEN_VIEWS = (2, 5)    # Задержка между просмотрами
+PROXY_REFRESH_INTERVAL = 600    # Обновлять прокси каждые 10 минут
+MAX_PROXY_CHECK = 300           # Проверять только первые 300 прокси
 
 # Состояния для ConversationHandler
 WAITING_FOR_LINK, WAITING_FOR_COUNT = range(2)
@@ -29,9 +30,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Хранилище данных пользователей
-user_data_store = {}
 
 # ========== ПРОКСИ МЕНЕДЖЕР ==========
 PROXY_SOURCES = [
@@ -98,23 +96,33 @@ class ProxyManager:
             response = requests.get(
                 'https://t.me',
                 proxies=proxies,
-                timeout=10,
+                timeout=8,
                 headers={'User-Agent': self._get_ua()}
             )
             return response.status_code == 200
         except:
             return False
     
-    def validate_proxies(self, proxies):
+    def validate_proxies(self, proxies, max_check=300):
+        """Проверяет только первые max_check прокси"""
         if not proxies:
             return []
         
-        logger.info(f"Проверяем {len(proxies)} прокси...")
-        valid = []
+        # Берем только первые max_check прокси
+        proxies_to_check = proxies[:max_check]
+        logger.info(f"Проверяем {len(proxies_to_check)} прокси (из {len(proxies)} всего)...")
         
-        for proxy in proxies:
+        valid = []
+        checked = 0
+        
+        for proxy in proxies_to_check:
             if proxy in self.banned_proxies:
                 continue
+            
+            checked += 1
+            if checked % 50 == 0:
+                logger.info(f"Проверено {checked}/{len(proxies_to_check)} прокси. Найдено: {len(valid)}")
+            
             if self.check_proxy(proxy):
                 valid.append(proxy)
             else:
@@ -127,7 +135,7 @@ class ProxyManager:
         with self.lock:
             logger.info("Обновление пула прокси...")
             raw_proxies = self.collect_proxies()
-            working_proxies = self.validate_proxies(raw_proxies)
+            working_proxies = self.validate_proxies(raw_proxies, MAX_PROXY_CHECK)
             
             for proxy in working_proxies:
                 if proxy not in self.proxy_usage_count:
@@ -135,6 +143,7 @@ class ProxyManager:
             
             self.proxies = working_proxies
             self.last_update = time.time()
+            logger.info(f"Пул прокси обновлен: {len(self.proxies)} рабочих прокси")
             return self.proxies
     
     def get_proxy(self):
@@ -229,7 +238,7 @@ class ViewBooster:
         while not self.stop_event.is_set() and self.stats['success'] < self.target_views:
             proxy = self.proxy_manager.get_proxy()
             if not proxy:
-                time.sleep(5)
+                time.sleep(3)
                 continue
             
             views_done = 0
@@ -253,8 +262,11 @@ class ViewBooster:
         
         self.proxy_manager.update_pool()
         
+        if not self.proxy_manager.proxies:
+            return "❌ Не найдено рабочих прокси. Попробуйте позже."
+        
         threads = []
-        for i in range(THREADS):
+        for i in range(min(THREADS, len(self.proxy_manager.proxies))):
             t = threading.Thread(target=self._worker)
             t.daemon = True
             t.start()
@@ -262,7 +274,7 @@ class ViewBooster:
         
         last_report = 0
         while self.stats['success'] < self.target_views and not self.stop_event.is_set():
-            time.sleep(5)
+            time.sleep(8)
             if self.stats['success'] > last_report:
                 percent = int(self.stats['success'] / self.target_views * 100)
                 try:
@@ -285,6 +297,11 @@ class ViewBooster:
 
 # ========== КОМАНДЫ БОТА ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверка админа (опционально)
+    if ADMIN_IDS and update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ У вас нет доступа к этому боту")
+        return ConversationHandler.END
+    
     await update.message.reply_text(
         "🤖 *Бот для накрутки просмотров Telegram*\n\n"
         "📌 *Как использовать:*\n"
@@ -301,12 +318,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = update.message.text.strip()
     
-    # Проверяем ссылку
-    if not link.startswith('https://t.me/') or len(link.split('/')) < 2:
+    if not link.startswith('https://t.me/') or len(link.split('/')) < 5:
         await update.message.reply_text("❌ Неверная ссылка. Пример: `https://t.me/durov/123`", parse_mode='Markdown')
         return WAITING_FOR_LINK
     
-    # Сохраняем ссылку
     context.user_data['post_url'] = link
     await update.message.reply_text(
         f"📌 Пост принят:\n`{link}`\n\n"
@@ -333,10 +348,9 @@ async def handle_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚀 Запускаю накрутку...\n\n"
         f"📌 Пост: {post_url}\n"
         f"🎯 Цель: {count} просмотров\n\n"
-        f"⏳ Процесс может занять несколько минут. Я буду сообщать о прогрессе."
+        f"⏳ Собираю прокси и начинаю накрутку. Это займет 1-2 минуты."
     )
     
-    # Запускаем накрутку в отдельном потоке
     booster = ViewBooster(post_url, count, update.effective_chat.id, context.bot)
     
     def run_and_report():
