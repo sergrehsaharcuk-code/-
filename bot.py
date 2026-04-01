@@ -6,7 +6,7 @@ import logging
 import re
 import os
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = "8709039732:AAGY2cekV_Z3HnQp6fNNBHkPnjGT5xR6LgE"
@@ -225,9 +225,10 @@ class AsyncBooster:
     
     async def run(self):
         if not self.channel or not self.post_id:
-            return "❌ Неверная ссылка"
+            await self.bot.send_message(chat_id=self.chat_id, text="❌ Неверная ссылка")
+            return
         
-        await self.bot.send_message(chat_id=self.chat_id, text=f"🚀 Запускаю накрутку {self.target} просмотров...\n⏳ Собираю прокси...")
+        await self.bot.send_message(chat_id=self.chat_id, text=f"🚀 Запускаю накрутку {self.target} просмотров...\n⏳ Собираю прокси (до 1 минуты)...")
         
         await self.proxy_manager.update_pool()
         
