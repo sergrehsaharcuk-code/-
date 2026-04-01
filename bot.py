@@ -7,17 +7,21 @@ import re
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
+# ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = "8709039732:AAGY2cekV_Z3HnQp6fNNBHkPnjGT5xR6LgE"
 ADMIN_IDS = [1526536345]
 
 MAX_VIEWS_PER_PROXY = 5
 MAX_CONCURRENT = 150
 MAX_PROXY_CHECK = 500
-PROXY_REFRESH_INTERVAL = 120
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
+# ========== ИСТОЧНИКИ ПРОКСИ ==========
 PROXY_SOURCES = [
     "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/http.txt",
     "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/socks5.txt",
@@ -25,12 +29,11 @@ PROXY_SOURCES = [
     "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt",
 ]
 
+# ========== МЕНЕДЖЕР ПРОКСИ ==========
 class ProxyManager:
     def __init__(self):
         self.proxies = []
         self.usage_count = {}
-        self.last_update = 0
-        self.updating = False
     
     async def collect_proxies(self):
         all_proxies = set()
@@ -54,29 +57,17 @@ class ProxyManager:
         return proxies
     
     async def update_pool(self):
-        if self.updating:
-            return self.proxies
-        
-        self.updating = True
-        try:
-            self.proxies = await self.collect_proxies()
-            for p in self.proxies:
-                if p not in self.usage_count:
-                    self.usage_count[p] = 0
-            self.last_update = time.time()
-            logger.info(f"🔧 Пул обновлен: {len(self.proxies)} прокси")
-        finally:
-            self.updating = False
+        self.proxies = await self.collect_proxies()
+        for p in self.proxies:
+            if p not in self.usage_count:
+                self.usage_count[p] = 0
+        logger.info(f"🔧 Пул обновлен: {len(self.proxies)} прокси")
         return self.proxies
     
     async def get_proxy(self):
-        if not self.proxies and not self.updating:
-            await self.update_pool()
-        
         if not self.proxies:
             return None
-        
-        proxy = min(self.proxies, key=lambda p: self.usage_count.get(p, 0))
+        proxy = random.choice(self.proxies)
         self.usage_count[proxy] = self.usage_count.get(proxy, 0) + 1
         return proxy
     
@@ -84,6 +75,7 @@ class ProxyManager:
         if proxy in self.proxies:
             self.proxies.remove(proxy)
 
+# ========== НАКРУТЧИК ==========
 class AsyncBooster:
     def __init__(self, post_url, target_views, chat_id, bot):
         self.post_url = post_url
@@ -105,48 +97,44 @@ class AsyncBooster:
         ]
         return random.choice(ua)
     
-    async def get_token(self, session, proxy):
+    async def send_view(self, proxy, session):
+        """Отправляет один просмотр через прокси"""
         try:
+            # Получаем токен
             async with session.get(
                 f'https://t.me/s/{self.channel}',
                 proxy=proxy,
                 timeout=8,
                 headers={'User-Agent': self._get_ua()}
             ) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    match = re.search(r'data-view="([^"]+)"', html)
-                    if match:
-                        return match.group(1)
-        except:
-            pass
-        return None
-    
-    async def send_view(self, proxy):
-        try:
-            async with aiohttp.ClientSession() as session:
-                token = await self.get_token(session, proxy)
-                if not token:
+                if resp.status != 200:
                     return False
-                
-                async with session.post(
-                    f'https://t.me/v/?views={self.post_id}&token={token}',
-                    proxy=proxy,
-                    timeout=8,
-                    headers={
-                        'User-Agent': self._get_ua(),
-                        'Referer': f'https://t.me/{self.channel}/{self.post_id}',
-                    }
-                ) as resp:
-                    return resp.status == 200
+                html = await resp.text()
+                match = re.search(r'data-view="([^"]+)"', html)
+                if not match:
+                    return False
+                token = match.group(1)
+            
+            # Отправляем просмотр
+            async with session.post(
+                f'https://t.me/v/?views={self.post_id}&token={token}',
+                proxy=proxy,
+                timeout=8,
+                headers={
+                    'User-Agent': self._get_ua(),
+                    'Referer': f'https://t.me/{self.channel}/{self.post_id}',
+                }
+            ) as resp:
+                return resp.status == 200
         except:
             return False
     
-    async def worker(self):
+    async def worker(self, session):
+        """Воркер с одной сессией"""
         while self.running and self.stats['success'] < self.target:
             proxy = await self.proxy_manager.get_proxy()
             if not proxy:
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
                 continue
             
             for _ in range(MAX_VIEWS_PER_PROXY):
@@ -154,7 +142,7 @@ class AsyncBooster:
                     break
                 
                 async with self.semaphore:
-                    if await self.send_view(proxy):
+                    if await self.send_view(proxy, session):
                         self.stats['success'] += 1
                         logger.info(f"✅ {self.stats['success']}/{self.target} | {proxy}")
                     else:
@@ -183,26 +171,32 @@ class AsyncBooster:
             )
             return
         
-        num_workers = min(80, len(self.proxy_manager.proxies))
-        workers = [asyncio.create_task(self.worker()) for _ in range(num_workers)]
-        logger.info(f"🚀 Запущено {num_workers} воркеров, прокси: {len(self.proxy_manager.proxies)}")
-        
-        last_success = 0
-        while self.running and self.stats['success'] < self.target:
-            await asyncio.sleep(10)
-            if self.stats['success'] > last_success:
-                percent = int(self.stats['success'] / self.target * 100)
-                await self.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=f"📊 {self.stats['success']}/{self.target} ({percent}%)\n"
-                         f"✅ {self.stats['success']} | ❌ {self.stats['failed']}\n"
-                         f"🔧 Прокси: {len(self.proxy_manager.proxies)}"
-                )
-                last_success = self.stats['success']
-        
-        self.running = False
-        for w in workers:
-            w.cancel()
+        # Создаем одну сессию для всех воркеров
+        async with aiohttp.ClientSession() as session:
+            num_workers = min(80, len(self.proxy_manager.proxies))
+            workers = [asyncio.create_task(self.worker(session)) for _ in range(num_workers)]
+            logger.info(f"🚀 Запущено {num_workers} воркеров, прокси: {len(self.proxy_manager.proxies)}")
+            
+            last_success = 0
+            while self.running and self.stats['success'] < self.target:
+                await asyncio.sleep(10)
+                if self.stats['success'] > last_success:
+                    percent = int(self.stats['success'] / self.target * 100)
+                    await self.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=f"📊 {self.stats['success']}/{self.target} ({percent}%)\n"
+                             f"✅ {self.stats['success']} | ❌ {self.stats['failed']}\n"
+                             f"🔧 Прокси: {len(self.proxy_manager.proxies)}"
+                    )
+                    last_success = self.stats['success']
+            
+            self.running = False
+            for w in workers:
+                w.cancel()
+                try:
+                    await w
+                except:
+                    pass
         
         await self.bot.send_message(
             chat_id=self.chat_id,
@@ -258,7 +252,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Введите число")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Бот работает\n⚡ Асинхронный режим")
+    await update.message.reply_text("✅ Бот работает\n⚡ Асинхронный режим\n🔧 4 источника прокси")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
