@@ -17,9 +17,9 @@ ADMIN_IDS = [1526536345]  # Ваш ID
 # Настройки накрутки
 MAX_VIEWS_PER_PROXY = 5        # 5 просмотров на один IP
 THREADS = 20                    # Количество потоков
-DELAY_BETWEEN_VIEWS = (2, 5)    # Задержка между просмотрами
+DELAY_BETWEEN_VIEWS = (2, 5)    # Задержка между просмотрами (сек)
 PROXY_REFRESH_INTERVAL = 600    # Обновлять прокси каждые 10 минут
-MAX_PROXY_CHECK = 300           # Проверять только первые 300 прокси
+MAX_PROXY_CHECK = 100           # Проверять только первые 100 прокси
 
 # Состояния для ConversationHandler
 WAITING_FOR_LINK, WAITING_FOR_COUNT = range(2)
@@ -32,18 +32,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== ПРОКСИ МЕНЕДЖЕР ==========
+# Только 3 самых надежных источника (быстрая загрузка)
 PROXY_SOURCES = [
-    ("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all", "http"),
-    ("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=10000&country=all", "socks4"),
-    ("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=all", "socks5"),
-    ("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", "http"),
-    ("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt", "socks4"),
-    ("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", "socks5"),
-    ("https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt", "http"),
-    ("https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt", "socks5"),
-    ("https://www.proxy-list.download/api/v1/get?type=http", "http"),
-    ("https://www.proxy-list.download/api/v1/get?type=socks4", "socks4"),
-    ("https://www.proxy-list.download/api/v1/get?type=socks5", "socks5"),
+    ("https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/http.txt", "http"),
+    ("https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/socks5.txt", "socks5"),
+    ("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=elite", "http"),
 ]
 
 class ProxyManager:
@@ -65,7 +58,7 @@ class ProxyManager:
     def fetch_from_source(self, url, proxy_type):
         proxies = []
         try:
-            response = requests.get(url, timeout=15, headers={'User-Agent': self._get_ua()})
+            response = requests.get(url, timeout=10, headers={'User-Agent': self._get_ua()})
             if response.status_code == 200:
                 for line in response.text.splitlines():
                     line = line.strip()
@@ -74,7 +67,8 @@ class ProxyManager:
                             line = f"{proxy_type}://{line}"
                         proxies.append(line)
             return proxies
-        except:
+        except Exception as e:
+            logger.debug(f"Ошибка при сборе с {url}: {e}")
             return []
     
     def collect_proxies(self):
@@ -85,7 +79,7 @@ class ProxyManager:
             proxies = self.fetch_from_source(url, proxy_type)
             for p in proxies:
                 all_proxies.add(p)
-            time.sleep(0.5)
+            time.sleep(0.3)  # Маленькая задержка между источниками
         
         logger.info(f"Всего собрано уникальных прокси: {len(all_proxies)}")
         return list(all_proxies)
@@ -96,14 +90,14 @@ class ProxyManager:
             response = requests.get(
                 'https://t.me',
                 proxies=proxies,
-                timeout=8,
+                timeout=5,  # Быстрая проверка
                 headers={'User-Agent': self._get_ua()}
             )
             return response.status_code == 200
         except:
             return False
     
-    def validate_proxies(self, proxies, max_check=300):
+    def validate_proxies(self, proxies, max_check=100):
         """Проверяет только первые max_check прокси"""
         if not proxies:
             return []
@@ -120,7 +114,7 @@ class ProxyManager:
                 continue
             
             checked += 1
-            if checked % 50 == 0:
+            if checked % 20 == 0:
                 logger.info(f"Проверено {checked}/{len(proxies_to_check)} прокси. Найдено: {len(valid)}")
             
             if self.check_proxy(proxy):
@@ -153,6 +147,7 @@ class ProxyManager:
         with self.lock:
             if not self.proxies:
                 return None
+            # Выбираем прокси с наименьшим количеством использований
             proxy = min(self.proxies, key=lambda p: self.proxy_usage_count.get(p, 0))
             self.proxy_usage_count[proxy] = self.proxy_usage_count.get(proxy, 0) + 1
             return proxy
@@ -162,6 +157,7 @@ class ProxyManager:
             if proxy in self.proxies:
                 self.proxies.remove(proxy)
                 self.banned_proxies.add(proxy)
+                logger.debug(f"Прокси {proxy} удален из пула")
 
 # ========== НАКРУТЧИК ==========
 class ViewBooster:
@@ -200,7 +196,7 @@ class ViewBooster:
             resp = requests.get(
                 f'https://t.me/s/{self.channel}',
                 proxies=proxies,
-                timeout=12,
+                timeout=10,
                 headers={'User-Agent': self._get_ua()}
             )
             if resp.status_code == 200:
@@ -223,7 +219,7 @@ class ViewBooster:
             resp = requests.post(
                 view_url,
                 proxies=proxies,
-                timeout=12,
+                timeout=10,
                 headers={
                     'User-Agent': self._get_ua(),
                     'Accept': '*/*',
@@ -235,10 +231,11 @@ class ViewBooster:
             return False
     
     def _worker(self):
+        """Поток-воркер: берет прокси, делает до MAX_VIEWS_PER_PROXY просмотров"""
         while not self.stop_event.is_set() and self.stats['success'] < self.target_views:
             proxy = self.proxy_manager.get_proxy()
             if not proxy:
-                time.sleep(3)
+                time.sleep(2)
                 continue
             
             views_done = 0
@@ -249,6 +246,7 @@ class ViewBooster:
                 if self._send_view(proxy):
                     self.stats['success'] += 1
                     views_done += 1
+                    logger.info(f"✅ Просмотр #{self.stats['success']} | Прокси: {proxy}")
                 else:
                     self.stats['failed'] += 1
                     self.proxy_manager.report_bad_proxy(proxy)
@@ -257,21 +255,37 @@ class ViewBooster:
                 time.sleep(random.uniform(*DELAY_BETWEEN_VIEWS))
     
     def run(self):
+        """Запускает накрутку"""
         if not self.channel or not self.post_id:
             return "❌ Неверная ссылка на пост"
         
+        # Отправляем сообщение о старте
+        try:
+            self.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"🚀 Запускаю накрутку...\n\n📌 Пост: {self.post_url}\n🎯 Цель: {self.target_views} просмотров\n\n⏳ Собираю прокси (1-2 минуты)..."
+            )
+        except:
+            pass
+        
+        # Обновляем пул прокси
         self.proxy_manager.update_pool()
         
         if not self.proxy_manager.proxies:
-            return "❌ Не найдено рабочих прокси. Попробуйте позже."
+            return "❌ Не найдено рабочих прокси. Попробуйте позже (через 10-20 минут)."
         
+        # Запускаем потоки
         threads = []
-        for i in range(min(THREADS, len(self.proxy_manager.proxies))):
-            t = threading.Thread(target=self._worker)
+        num_threads = min(THREADS, len(self.proxy_manager.proxies))
+        for i in range(num_threads):
+            t = threading.Thread(target=self._worker, name=f"Worker-{i+1}")
             t.daemon = True
             t.start()
             threads.append(t)
         
+        logger.info(f"Запущено {len(threads)} потоков, прокси: {len(self.proxy_manager.proxies)}")
+        
+        # Мониторинг прогресса
         last_report = 0
         while self.stats['success'] < self.target_views and not self.stop_event.is_set():
             time.sleep(8)
@@ -289,15 +303,21 @@ class ViewBooster:
                     pass
                 last_report = self.stats['success']
         
+        # Останавливаем потоки
         self.stop_event.set()
         for t in threads:
             t.join(timeout=2)
         
-        return f"✅ Накрутка завершена!\n\n📌 Пост: {self.post_url}\n🎯 Цель: {self.target_views}\n✅ Успешно: {self.stats['success']}\n❌ Ошибок: {self.stats['failed']}"
+        result = f"✅ Накрутка завершена!\n\n📌 Пост: {self.post_url}\n🎯 Цель: {self.target_views}\n✅ Успешно: {self.stats['success']}\n❌ Ошибок: {self.stats['failed']}"
+        
+        if self.stats['success'] == 0:
+            result += "\n\n⚠️ Не удалось накрутить ни одного просмотра. Попробуйте позже."
+        
+        return result
 
 # ========== КОМАНДЫ БОТА ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверка админа (опционально)
+    # Проверка админа
     if ADMIN_IDS and update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ У вас нет доступа к этому боту")
         return ConversationHandler.END
@@ -306,7 +326,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 *Бот для накрутки просмотров Telegram*\n\n"
         "📌 *Как использовать:*\n"
         "1. Отправьте мне ссылку на пост\n"
-        "2. Введите количество просмотров\n"
+        "2. Введите количество просмотров (до 5000 за раз)\n"
         "3. Бот запустит накрутку и будет сообщать о прогрессе\n\n"
         "📝 *Пример ссылки:*\n"
         "`https://t.me/durov/123`\n\n"
@@ -318,14 +338,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = update.message.text.strip()
     
-    if not link.startswith('https://t.me/') or len(link.split('/')) < 5:
+    # Проверка ссылки
+    if not link.startswith('https://t.me/'):
         await update.message.reply_text("❌ Неверная ссылка. Пример: `https://t.me/durov/123`", parse_mode='Markdown')
+        return WAITING_FOR_LINK
+    
+    parts = link.split('/')
+    if len(parts) < 5:
+        await update.message.reply_text("❌ Неверный формат. Пример: `https://t.me/durov/123`", parse_mode='Markdown')
         return WAITING_FOR_LINK
     
     context.user_data['post_url'] = link
     await update.message.reply_text(
         f"📌 Пост принят:\n`{link}`\n\n"
-        f"📊 Введите количество просмотров (например: 1000):",
+        f"📊 Введите количество просмотров (до 5000):",
         parse_mode='Markdown'
     )
     return WAITING_FOR_COUNT
@@ -333,10 +359,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         count = int(update.message.text.strip())
-        if count <= 0:
-            raise ValueError
+        if count <= 0 or count > 5000:
+            await update.message.reply_text("❌ Введите число от 1 до 5000")
+            return WAITING_FOR_COUNT
     except:
-        await update.message.reply_text("❌ Введите положительное число (например: 1000)")
+        await update.message.reply_text("❌ Введите число (например: 500)")
         return WAITING_FOR_COUNT
     
     post_url = context.user_data.get('post_url')
@@ -344,21 +371,23 @@ async def handle_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка: ссылка не найдена. Начните заново командой /start")
         return ConversationHandler.END
     
+    # Отправляем подтверждение
     await update.message.reply_text(
-        f"🚀 Запускаю накрутку...\n\n"
+        f"✅ Задача принята!\n\n"
         f"📌 Пост: {post_url}\n"
         f"🎯 Цель: {count} просмотров\n\n"
-        f"⏳ Собираю прокси и начинаю накрутку. Это займет 1-2 минуты."
+        f"⏳ Идет подготовка (сбор прокси)..."
     )
     
+    # Запускаем накрутку в отдельном потоке
     booster = ViewBooster(post_url, count, update.effective_chat.id, context.bot)
     
     def run_and_report():
         result = booster.run()
         try:
             context.bot.send_message(chat_id=update.effective_chat.id, text=result)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка отправки финального отчета: {e}")
     
     thread = threading.Thread(target=run_and_report)
     thread.daemon = True
@@ -377,16 +406,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - показать справку\n"
         "/status - статус бота\n\n"
         "*Как работает:*\n"
-        "1. Отправьте ссылку на пост\n"
-        "2. Укажите количество просмотров\n"
-        "3. Бот сам накрутит и сообщит о завершении",
+        "1. Отправьте ссылку на пост (например, https://t.me/durov/123)\n"
+        "2. Укажите количество просмотров (до 5000)\n"
+        "3. Бот соберет бесплатные прокси и запустит накрутку\n\n"
+        "*Важно:*\n"
+        "• Бесплатные прокси работают нестабильно\n"
+        "• Если прокси не найдены, повторите через 10-20 минут\n"
+        "• 5 просмотров с одного IP, затем смена",
         parse_mode='Markdown'
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "✅ Бот работает и готов к выполнению задач!\n\n"
-        "📌 Отправьте /start, чтобы начать накрутку."
+        "📌 Отправьте /start, чтобы начать накрутку.\n\n"
+        "⚠️ Бесплатные прокси обновляются каждые 10 минут.\n"
+        "Если нет рабочих прокси, повторите попытку позже."
     )
 
 # ========== ЗАПУСК ==========
@@ -406,7 +441,7 @@ def main():
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('status', status))
     
-    logger.info("Бот запущен!")
+    logger.info("Бот запущен! Готов к работе.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
