@@ -7,7 +7,6 @@ import re
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = "8709039732:AAGY2cekV_Z3HnQp6fNNBHkPnjGT5xR6LgE"
 ADMIN_IDS = [1526536345]
 
@@ -16,14 +15,9 @@ MAX_CONCURRENT = 150
 MAX_PROXY_CHECK = 500
 PROXY_REFRESH_INTERVAL = 120
 
-# ========== ЛОГИРОВАНИЕ ==========
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ========== ИСТОЧНИКИ ПРОКСИ ==========
 PROXY_SOURCES = [
     "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/http.txt",
     "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/socks5.txt",
@@ -31,12 +25,12 @@ PROXY_SOURCES = [
     "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt",
 ]
 
-# ========== МЕНЕДЖЕР ПРОКСИ ==========
 class ProxyManager:
     def __init__(self):
         self.proxies = []
         self.usage_count = {}
         self.last_update = 0
+        self.updating = False
     
     async def collect_proxies(self):
         all_proxies = set()
@@ -60,23 +54,28 @@ class ProxyManager:
         return proxies
     
     async def update_pool(self):
-        self.proxies = await self.collect_proxies()
-        for p in self.proxies:
-            if p not in self.usage_count:
-                self.usage_count[p] = 0
-        self.last_update = time.time()
-        logger.info(f"🔧 Пул обновлен: {len(self.proxies)} прокси")
+        if self.updating:
+            return self.proxies
+        
+        self.updating = True
+        try:
+            self.proxies = await self.collect_proxies()
+            for p in self.proxies:
+                if p not in self.usage_count:
+                    self.usage_count[p] = 0
+            self.last_update = time.time()
+            logger.info(f"🔧 Пул обновлен: {len(self.proxies)} прокси")
+        finally:
+            self.updating = False
         return self.proxies
     
     async def get_proxy(self):
-        # Если нет прокси или прошло больше 2 минут - обновляем
-        if not self.proxies or time.time() - self.last_update > PROXY_REFRESH_INTERVAL:
+        if not self.proxies and not self.updating:
             await self.update_pool()
         
         if not self.proxies:
             return None
         
-        # Берем прокси с наименьшим количеством использований
         proxy = min(self.proxies, key=lambda p: self.usage_count.get(p, 0))
         self.usage_count[proxy] = self.usage_count.get(proxy, 0) + 1
         return proxy
@@ -84,9 +83,7 @@ class ProxyManager:
     async def report_bad(self, proxy):
         if proxy in self.proxies:
             self.proxies.remove(proxy)
-            logger.debug(f"🗑️ Удален: {proxy}")
 
-# ========== НАКРУТЧИК ==========
 class AsyncBooster:
     def __init__(self, post_url, target_views, chat_id, bot):
         self.post_url = post_url
@@ -149,7 +146,7 @@ class AsyncBooster:
         while self.running and self.stats['success'] < self.target:
             proxy = await self.proxy_manager.get_proxy()
             if not proxy:
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 continue
             
             for _ in range(MAX_VIEWS_PER_PROXY):
@@ -174,7 +171,7 @@ class AsyncBooster:
         
         await self.bot.send_message(
             chat_id=self.chat_id,
-            text=f"🚀 Запускаю накрутку {self.target} просмотров...\n⏳ Собираю прокси..."
+            text=f"🚀 Запускаю накрутку {self.target} просмотров..."
         )
         
         await self.proxy_manager.update_pool()
@@ -261,7 +258,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Введите число")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Бот работает\n⚡ Асинхронный режим\n🔄 Обновление прокси каждые 2 минуты")
+    await update.message.reply_text("✅ Бот работает\n⚡ Асинхронный режим")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
