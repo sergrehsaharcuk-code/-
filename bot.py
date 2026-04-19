@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Хранилище активных задач
-active_tasks = {}  # {task_id: {'active': True, 'chat_id': xxx, 'message_id': xxx}}
+active_tasks = {}
 
 # Глобальный пул прокси
 PROXY_POOL = []
@@ -135,7 +135,7 @@ async def booster(post_url, target_views, chat_id, bot, task_id, status_msg):
         f"└ {success}/{target_views} просмотров\n"
         f"└ ❌ Ошибок: {failed}\n"
         f"└ 🔄 Перебрано прокси: {proxy_index}\n"
-        f"└ 🎯 Эффективность: {int(success/(success+failed)*100)}%",
+        f"└ 🎯 Эффективность: {int(success/(success+failed)*100) if success+failed > 0 else 0}%",
         parse_mode='Markdown'
     )
     
@@ -187,7 +187,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if active_tasks:
-        task_list = "\n".join([f"• Задача {tid}" for tid in active_tasks.keys()])
+        task_list = "\n".join([f"• Задача {tid[:8]}..." for tid in active_tasks.keys()])
         await update.message.reply_text(
             f"🟢 *Активные задачи:* {len(active_tasks)}\n"
             f"{task_list}",
@@ -246,11 +246,11 @@ def main():
     app.add_handler(CommandHandler("status", status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Предзагружаем прокси при старте
-    asyncio.create_task(load_proxies())
-    
     logger.info("🚀 Бот запущен!")
     logger.info("📌 Команды: /start - начать, /stop - остановить, /status - статус")
+    
+    # Загружаем прокси через run_coroutine_threadsafe или просто при первом запросе
+    # Убираем проблемную строку - прокси загрузятся при первой накрутке
     
     app.run_polling()
 
